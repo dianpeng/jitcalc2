@@ -121,13 +121,12 @@ void tk_move( struct tokenizer* tk ) {
   tk_next(tk);
 }
 
-/* do compilation
+/* Do Compilation
  * term := factor |
  *      := term '+'|'-' factor
  * factor:= atomic |
  *          factor '*'|'/' atomic
- * atomic := NUMBER | VARIABLE
- */
+ * atomic := NUMBER | VARIABLE */
 
 struct compiler {
   struct tokenizer tk;
@@ -158,7 +157,7 @@ int atomic( struct compiler* comp , int REG ) {
       var = STRTABLE[STRTABLE_POS++] =
         strdup(comp->tk.val.symbol);
       /* generate call stub */
-      | pusharg &var
+      | pusharg var
       | callp &lookup
       if( REG == REG_EBX ) {
         | mov ebx, eax
