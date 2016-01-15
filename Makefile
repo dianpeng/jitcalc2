@@ -12,3 +12,4 @@ calc: preprocess src/calc.c
 .PHONY:clean
 clean:
 	find . -maxdepth 1 -executable -type f -delete
+	rm src/calc.pp.c
