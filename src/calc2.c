@@ -620,7 +620,7 @@ int comparison( struct compiler* comp , int REG ) {
 }
 
 int logic( struct compiler* comp , int REG ) {
-  if(comparison(comp,REG_EAX))
+  if(comparison(comp,REG_EBX))
     return -1;
   else {
     int op;
@@ -637,17 +637,17 @@ int logic( struct compiler* comp , int REG ) {
 
       tag = comp->tag; /* get the tag for current jump position */
 
-      | cmp eax, 0
+      | xor eax, eax
+      | cmp ebx, 0
       
       if(op == TK_AND) {
-        | mov eax, 0
         | je =>tag
       } else {
-        | mov eax, 1
+        | setne al
         | jne =>tag
       }
 
-      if(comparison(comp,REG_EAX))
+      if(comparison(comp,REG_EBX))
         return -1;
     } while(1);
 
@@ -667,8 +667,8 @@ int logic( struct compiler* comp , int REG ) {
     } else {
       /* we don't have a actual logic combinator,
        * so no need to normalize the value */
-      if(REG == REG_EBX) {
-        | mov ebx, eax
+      if(REG == REG_EAX) {
+        | mov eax, ebx
       }
     }
   } 
