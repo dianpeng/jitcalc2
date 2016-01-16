@@ -4,7 +4,7 @@ example for how to use this library since there's not too much
 information about it.
 
 #Contents
-## calc.c
+## calc1.c
 This calculator is a very simple unsigned integer calculator, which support + - * / and variable
 lookup.( I forget to implement the unary operation , so actually it still uses signed instructions )
 
