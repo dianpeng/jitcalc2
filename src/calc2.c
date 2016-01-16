@@ -21,9 +21,7 @@
 
 /* Now things become complicated because we allow user to call functions. For simplicity
  * we *ONLY* allow user to call a function with maximum 6 arguments .Because these 6
- * arguments can be passed into register by default on X64 which is simple for us.
- * Also we need to pay attention to the arguments pushed sequence is from *RIGHT* to
- * *LEFT* */
+ * arguments can be passed into register by default on X64 which is simple for us */
 
 |.macro pusharg1, arg1
   | mov edi, arg1
@@ -668,8 +666,18 @@ static int my_abs( int val ) {
   return val > 0 ? val : -val;
 }
 
+static int my_mul(int a, int b) {
+  return a*b;
+}
+
+static int my_div(int a,int b) {
+  return a/b;
+}
+
 int main( int argc , char* argv[] ) {
-  add_func("abs",(void*)my_abs);
+  add_func("abs",my_abs);
+  add_func("mul",my_mul);
+  add_func("div",my_div);
   if( argc != 2 ) {
     fprintf(stderr,"usage: calc 1+2+3*var\n");
     return -1;
