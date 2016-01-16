@@ -272,7 +272,7 @@ void *jitcode(dasm_State **state) {
 
   // Adjust the memory permissions so it is executable
   // but no longer writable.
-  int success = mprotect(mem, size, PROT_EXEC | PROT_READ);
+  int success = mprotect(mem, size, PROT_EXEC | PROT_READ );
   assert(success == 0);
 
   return ret;
@@ -288,6 +288,12 @@ void* compile( const char* src ) {
 
   comp.dstate = state;
 
+  /* This is a hack. Macro can be pushed and poped
+   * but I just don't want this compiler directives */
+#undef Dst
+#define Dst (&(comp.dstate))
+
+  | push rbx
   /* initialize lexer */
   if(tk_init(&(comp.tk),src) <0)
     return NULL;
@@ -296,22 +302,19 @@ void* compile( const char* src ) {
   if(term(&comp,REG_EAX))
     return NULL;
 
-  /* This is a hack. Macro can be pushed and poped
-   * but I just don't want this compiler directives */
-#undef Dst
-#define Dst (&(comp.dstate))
-
-  /* emit epilog, no prolog is because on X64
-   * we don't need to emit stack frame indeed and
-   * inside of our function body we don't use stack
-   * at all . Also the return value is already in the
-   * EAX register */
+  | pop rbx
   | ret
 
   state = comp.dstate; /* For safety reason, since it is a pointer 2
                         * pointer, not sure it is modified or not */
   /* get the jited code */
   return jitcode(&state);
+}
+
+/* For the sake of god, I will unmap those pages */
+void free_jitcode(void *code) {
+  void *mem = (char*)code - sizeof(size_t);
+  munmap(mem,*(size_t*)mem);
 }
 
 typedef int (*func)();
@@ -325,6 +328,7 @@ int main( int argc , char* argv[] ) {
     assert(c);
     func f = (func)c;
     printf("%d\n",f());
+    free_jitcode(c);
     return 0;
   }
 }
