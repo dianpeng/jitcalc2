@@ -9,7 +9,7 @@ calc1: src/calc1.c
 
 calc2: src/calc2.c
 	$(LUA) dynasm/dynasm.lua -o src/calc2.pp.c src/calc2.c
-	gcc -O3 -g src/calc2.pp.c -o calc2
+	gcc  -g src/calc2.pp.c -o calc2
 
 .PHONY:clean
 clean:

@@ -81,6 +81,10 @@ enum {
   TK_NOT,
   TK_LPAR,
   TK_RPAR,
+  TK_AND,
+  TK_OR,
+  TK_QUESTION,
+  TK_COLON,
   TK_COMMA,
   TK_EOF
 };
@@ -147,6 +151,28 @@ re_lex:
     case ')':
       tk->len = 1;
       return (tk->tk = TK_RPAR);
+    case '&':
+      if(tk->src[tk->pos+1] == '&') {
+        tk->len = 2;
+        return (tk->tk = TK_AND);
+      } else {
+        fprintf(stderr,"unknown token:\"&\".Do you mean \"&&\"");
+        return -1;
+      }
+    case '|':
+      if(tk->src[tk->pos+1] == '|') {
+        tk->len = 2;
+        return (tk->tk = TK_OR);
+      } else {
+        fprintf(stderr,"unknown token:\"|\".Do you mean \"||\"");
+        return -1;
+      }
+    case '?':
+      tk->len = 1;
+      return (tk->tk = TK_QUESTION);
+    case ':':
+      tk->len = 1;
+      return (tk->tk = TK_COLON);
     case '0':case '1':case '2':case '3':case '4':
     case '5':case '6':case '7':case '8':case '9':
       { /* parsing the number into val */
@@ -225,7 +251,19 @@ void tk_move( struct tokenizer* tk ) {
 struct compiler {
   struct tokenizer tk;
   dasm_State* dstate;
+  int tag;
+  int tag_cap;
 };
+
+void check_compiler_tag( struct compiler* comp ) {
+  if(comp->tag == comp->tag_cap) {
+    if(comp->tag_cap == 0)
+      comp->tag_cap = 4;
+    else
+      comp->tag_cap*=2;
+    dasm_growpc(Dst,comp->tag_cap);
+  }
+}
 
 /* Variable lookup */
 const char* STRTABLE[100];
@@ -581,8 +619,107 @@ int comparison( struct compiler* comp , int REG ) {
   return 0;
 }
 
+int logic( struct compiler* comp , int REG ) {
+  if(comparison(comp,REG_EAX))
+    return -1;
+  else {
+    int op;
+    int tag = -1;
+
+    do {
+      if(comp->tk.tk != TK_AND &&
+         comp->tk.tk != TK_OR ) {
+        break;
+      }
+      op = comp->tk.tk;
+      tk_move(&(comp->tk));
+      check_compiler_tag(comp);
+
+      tag = comp->tag; /* get the tag for current jump position */
+
+      | cmp eax, 0
+      
+      if(op == TK_AND) {
+        | mov eax, 0
+        | je =>tag
+      } else {
+        | mov eax, 1
+        | jne =>tag
+      }
+
+      if(comparison(comp,REG_EAX))
+        return -1;
+    } while(1);
+
+    /* normalize value */
+    if( tag >= 0 ) {
+      |=>tag:
+      | cmp eax, 0
+      | setne al
+
+      if(REG == REG_EBX) {
+        | movzx ebx, al
+      } else {
+        | movzx eax, al
+      }
+
+      ++comp->tag;
+    } else {
+      /* we don't have a actual logic combinator,
+       * so no need to normalize the value */
+      if(REG == REG_EBX) {
+        | mov ebx, eax
+      }
+    }
+  } 
+  return 0;
+}
+
 int expr( struct compiler* comp , int REG ) {
-  return comparison(comp,REG);
+  if(logic(comp,REG_EBX))
+    return -1;
+
+  if(comp->tk.tk == TK_QUESTION) {
+    int tag;
+    int exit;
+    tk_move(&(comp->tk));
+
+    check_compiler_tag(comp);
+    tag = comp->tag;
+
+    check_compiler_tag(comp);
+    exit = comp->tag+1;
+
+    | cmp ebx, 0
+    | je => tag
+
+    /* first value */
+    if(logic(comp,REG_EAX))
+      return -1;
+    | jne =>exit
+
+    if(comp->tk.tk == TK_COLON)
+      tk_move(&(comp->tk));
+    else {
+      fprintf(stderr,"Tenary needs \":\"!");
+      return -1;
+    }
+
+    /* second value */
+    |=> tag:
+    if(logic(comp,REG_EAX))
+      return -1;
+
+    /* exit location for this tenary */
+    |=> exit:
+
+    comp->tag += 2;
+  }
+
+  if( REG == REG_EBX ) {
+    | mov ebx, eax
+  }
+  return 0;
 }
 
 /* COPYWRITE for haberman.
@@ -618,6 +755,7 @@ void *jitcode(dasm_State **state) {
 void* compile( const char* src ) {
   struct compiler comp;
   dasm_State* state = comp.dstate;
+  comp.tag = comp.tag_cap = 0;
 
   /* initialize dynasm dstate */
   dasm_init(&state,1);
