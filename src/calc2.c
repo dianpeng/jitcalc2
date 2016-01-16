@@ -245,14 +245,6 @@ static int lookup( const char* name ) {
     return 0;
 }
 
-/* Function lookup
- * Our function lookup is simple, we have an array
- * that holds a function pointer. Since we are not
- * in C world, so we just randomly *CALL* the pointer,
- * haha , kind of like party. So we may crash. But the
- * point is that if a function never use those arguments
- * or register, they wiil not crash even a function only
- * wants 2 arguments but you give it 3 or more */
 struct function {
   void* where;
   const char* name;
