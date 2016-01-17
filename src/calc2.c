@@ -404,7 +404,7 @@ int atomic( struct compiler* comp , int REG ) {
         return func_call(comp,REG,var);
       } else {
         /* generate call stub */
-        | pusharg1 var
+        | mov rdi, var
         | callp &lookup
         if( REG == REG_EBX ) {
           | mov ebx, eax
@@ -807,10 +807,20 @@ static int my_div(int a,int b) {
   return a/b;
 }
 
+static int my_min(int a,int b) {
+  return a > b ? b : a;
+}
+
+static int my_max(int a,int b) {
+  return a > b ? a : b;
+}
+
 int main( int argc , char* argv[] ) {
   add_func("abs",my_abs);
   add_func("mul",my_mul);
   add_func("div",my_div);
+  add_func("min",my_min);
+  add_func("max",my_max);
   if( argc != 2 ) {
     fprintf(stderr,"usage: calc 1+2+3*var\n");
     return -1;
