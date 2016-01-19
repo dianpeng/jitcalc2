@@ -10,6 +10,11 @@
 #include <sys/mman.h>
 #include <inttypes.h>
 
+#ifdef DUMP_ASSEMBLY
+/* For dumping the assembly code out */
+#include <udis86.h>
+#endif /* DUMP_ASSEMBLY */
+
 
 /* This calculator is more fancy than the one we build in calc2.c. It actually allows
  * you to handle floating point number calculation. Also we allow user to call a func
@@ -548,6 +553,12 @@ int atomic( struct compiler* comp , int REG ) {
   return 0;
 }
 
+/* Represent a registers use cases */
+struct reg {
+  int on : 1; /* If this register is used or not */
+  int pos: 31;/* Position of this register relative to other */
+};
+
 /* unary */
 int unary( struct compiler* comp , int REG ) {
   /* generate code for unary is kind of tricky,
@@ -558,6 +569,10 @@ int unary( struct compiler* comp , int REG ) {
   int op[32]; /* You will have 32 operators, are you kidding me ? */
   int sz = 0;
   int i;
+  struct reg xmm, ecx;
+  int pos = 0;
+  xmm.on = 0;
+  ecx.on = 0;
 
   do {
     if(comp->tk.tk == TK_NOT ||
@@ -575,15 +590,7 @@ int unary( struct compiler* comp , int REG ) {
     tk_move(&(comp->tk));
   } while(1);
 
-  /* now we need to call atomic function */
-  /* we don't need to save rax because until now we haven't used it */
-  if(REG != REG_XMM0) {
-    | pushxmm xmm0
-  } else {
-    | pushxmm xmm1
-  }
-
-  if(atomic(comp,REG_XMM0)) {
+  if(atomic(comp,REG)) {
     return -1;
   }
 
@@ -596,8 +603,24 @@ int unary( struct compiler* comp , int REG ) {
          * I want to do is just fliping the MSB of this 64 bits value. To do
          * this we load a negative zero which has MSB set to 1, rest to be zero.
          * And XOR it with the value we want to negate */
-        | movsd xmm1, qword [&NZERO]
-        | xorpd xmm0, xmm1
+        if( REG == REG_XMM0 ) {
+          if(!xmm.on) {
+            xmm.on = 1;
+            xmm.pos = pos++;
+            | pushxmm xmm1
+          }
+          | movsd xmm1, qword [&NZERO]
+          | xorpd xmm0, xmm1
+        } else {
+          if(!xmm.on) {
+            xmm.on = 1;
+            xmm.pos = pos++;
+            | pushxmm xmm0
+          }
+          | movsd xmm0, qword [&NZERO]
+          | xorpd xmm1, xmm0
+        }
+        break;
       case TK_ADD:
         /* positive sign is crap */
         break;
@@ -607,39 +630,74 @@ int unary( struct compiler* comp , int REG ) {
          * If it is zero, just load true to xmm0 , otherwise false to xmm0. I don't
          * quit understand how GCC generate code for this thing, actually. But this
          * one is good for illustration here */
-        | xorpd xmm1,xmm1
-        | comisd xmm0,xmm1
-        | jne >1
-        | movsd xmm0,qword [&DTRUE]
-        |1:
-        | movsd xmm0,qword [&DFALSE]
+        if( REG == REG_XMM0 ) {
+          if(!xmm.on) {
+            xmm.on = 1;
+            xmm.pos = pos++;
+            | pushxmm xmm1
+          }
+          if(!ecx.on) {
+            ecx.on = 1;
+            ecx.pos = pos++;
+            | push rcx
+          }
+          | xorpd xmm1,xmm1
+          | xor ecx, ecx
+          | comisd xmm0,xmm1
+          | sete cl
+          | cvtsi2sd xmm0, ecx
+        } else {
+          if(!xmm.on) {
+            xmm.on = 1;
+            xmm.pos= pos++;
+            | pushxmm xmm0
+          }
+          if(!ecx.on) {
+            ecx.on = 1;
+            ecx.pos= pos++;
+            | push rcx
+          }
+          | xorpd xmm0,xmm0
+          | xor ecx,ecx
+          | comisd xmm1,xmm0
+          | sete cl
+          | cvtsi2sd xmm1,ecx
+        }
         break;
       default:
         assert(0);
     }
-  }
 
-  if( REG == REG_XMM1 ) {
-    | movsd xmm1,xmm0
-    | popxmm xmm0
-  } else {
-    | popxmm xmm1
+    /* Pop the register based on the relative order */
+    if(xmm.on) {
+      if(xmm.pos ==0) {
+        if( REG == REG_XMM0 ) {
+          | popxmm xmm1
+        } else {
+          | popxmm xmm0
+        }
+      } else {
+        assert(ecx.on);
+        assert(ecx.pos ==0);
+        | pop rcx
+        if( REG == REG_XMM0 ) {
+          | popxmm xmm1
+        } else {
+          | popxmm xmm0
+        }
+      }
+    }
   }
   return 0;
 }
 
 /* factor */
 int factor( struct compiler* comp , int REG ) {
-  if( REG != REG_XMM0 ) {
-    | pushxmm xmm0
-  } else {
-    | pushxmm xmm1
-  }
-
-  if(unary(comp,REG_XMM0)) {
+  if(unary(comp,REG)) {
     return -1;
   }
   else {
+    int mreg = 0;
     /* now the value is already in EAX */
     do {
       int op;
@@ -649,39 +707,48 @@ int factor( struct compiler* comp , int REG ) {
       }
       op = comp->tk.tk;
       tk_move(&(comp->tk));
-
-      if(unary(comp,REG_XMM1))
+      if(!mreg) {
+        mreg = 1;
+        if( REG == REG_XMM0 ) {
+          | pushxmm xmm1
+        } else {
+          | pushxmm xmm0
+        }
+      }
+      if(unary(comp,!REG))
         return -1;
 
       if(op == TK_MUL) {
-        | mulsd xmm0, xmm1
+        if( REG == REG_XMM0 ) {
+          | mulsd xmm0, xmm1
+        } else {
+          | mulsd xmm1, xmm0
+        }
       } else {
-        | divsd xmm0, xmm1
+        if( REG == REG_XMM1 ) {
+          | divsd xmm0, xmm1
+        } else {
+          | divsd xmm1, xmm0
+        }
       }
-
     } while(1);
-  }
-
-
-  if( REG == REG_XMM1 ) {
-    | movsd xmm1,xmm0
-    | popxmm xmm0
-  } else {
-    | popxmm xmm1
+    if(mreg) {
+      if( REG == REG_XMM0 ) {
+        | popxmm xmm1
+      } else {
+        | popxmm xmm0
+      }
+    }
   }
   return 0;
 }
 
 /* term */
 int term( struct compiler* comp , int REG ) {
-  if( REG != REG_XMM0 ) {
-    | pushxmm xmm0
-  } else {
-    | pushxmm xmm1
-  }
-  if(factor(comp,REG_XMM0))
+  if(factor(comp,REG))
     return -1;
   else {
+    int mreg = 0;
     do {
       int op;
       if(comp->tk.tk != TK_ADD &&
@@ -691,21 +758,38 @@ int term( struct compiler* comp , int REG ) {
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      if(factor(comp,REG_XMM1))
+      if( mreg< 0 ) {
+        mreg = 1;
+        if( REG == REG_XMM0 ) {
+          | pushxmm xmm1
+        } else {
+          | pushxmm xmm0
+        }
+      }
+      if(factor(comp,!REG))
         return -1;
 
       if(op == TK_ADD) {
-        | addsd xmm0, xmm1
+        if( REG == REG_XMM0 ) {
+          | addsd xmm0, xmm1
+        } else {
+          | addsd xmm1, xmm0
+        }
       } else {
-        | subsd xmm0, xmm1
+        if( REG == REG_XMM0 ) {
+          | subsd xmm0, xmm1
+        } else {
+          | subsd xmm1, xmm0
+        }
       }
     } while(1);
-  }
-  if( REG == REG_XMM1 ) {
-    | movsd xmm1, xmm0
-    | popxmm xmm0
-  } else {
-    | popxmm xmm1
+    if(mreg) {
+      if( REG == REG_XMM0 ) {
+        | popxmm xmm1
+      } else {
+        | popxmm xmm0
+      }
+    }
   }
   return 0;
 }
@@ -715,17 +799,12 @@ int comparison( struct compiler* comp , int REG ) {
   /* generate comparison is simple just need to use
    * CMP/TEST instructions. Since we don't bother for
    * having optimization, mostly we just use CMP */
-
-  if( REG == REG_XMM0 ) {
-    | pushxmm xmm1
-  } else {
-    | pushxmm xmm0
-  }
-
-  if(term(comp,REG_XMM0))
+  if(term(comp,REG))
     return -1;
   else {
     int op;
+    int mreg = 0; /* indicate whether we use a new register
+                   * or not */
     do {
       if(comp->tk.tk != TK_LT &&
           comp->tk.tk != TK_LE &&
@@ -738,88 +817,97 @@ int comparison( struct compiler* comp , int REG ) {
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      if(term(comp,REG_XMM1))
+      if( !mreg ) {
+        mreg = 1;
+        if( REG == REG_XMM0 ) {
+          | pushxmm xmm1
+        } else {
+          | pushxmm xmm0
+        }
+      }
+
+      /* Use !REG to get its conterpart register */
+      if(term(comp,!REG))
         return -1;
 
+      | push rcx
       switch(op) {
         case TK_LT:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | setb cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         case TK_LE:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | setbe cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         case TK_GT:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | seta cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         case TK_GE:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | setae cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         case TK_EQ:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | sete cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         case TK_NE:
-          | push rcx
-          | comisd xmm0, xmm1
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | setne cl
-          | movzx ecx, cl
-          | cvtsi2sd xmm0, ecx
-          | pop rcx
           break;
         default:
           assert(0);
       }
+      | movzx ecx, cl
+      if( REG == REG_XMM0 ) {
+        | cvtsi2sd xmm0, ecx
+      } else {
+        | cvtsi2sd xmm1, ecx
+      }
+      | pop rcx
     } while(1);
-  }
-  if( REG == REG_XMM0 ) {
-    | popxmm xmm1
-  } else {
-    | movsd xmm1, xmm0
-    | popxmm xmm0
+    if(mreg) {
+      if( REG == REG_XMM0 ) {
+        | popxmm xmm1
+      } else {
+        | popxmm xmm0
+      }
+    }
   }
   return 0;
 }
 
 int logic( struct compiler* comp , int REG ) {
-  if( REG == REG_XMM0 ) {
-    | pushxmm xmm1
-  } else {
-    | pushxmm xmm0
-  }
-
-  if(comparison(comp,REG_XMM1))
+  if(comparison(comp,REG))
     return -1;
   else {
     int op;
     int tag = -1;
-
-    | xorpd xmm0, xmm0
-    | push rax
-    | xor eax, eax
 
     do {
       if(comp->tk.tk != TK_AND &&
@@ -828,7 +916,11 @@ int logic( struct compiler* comp , int REG ) {
           /* Right now, the last value of check_compiler_tag
            * is not in the eax but in xmm1/xmm0. We need to
            * do the comparison and set the eax accordingly */
-          | comisd xmm1, xmm0
+          if( REG == REG_XMM0 ) {
+            | comisd xmm0, xmm1
+          } else {
+            | comisd xmm1, xmm0
+          }
           | setne al
           | movzx eax, al
         }
@@ -841,10 +933,22 @@ int logic( struct compiler* comp , int REG ) {
         check_compiler_tag(comp);
         tag = comp->tag;
         ++comp->tag;
+        if( REG == REG_XMM0 ) {
+          | pushxmm xmm1
+          | xorpd xmm1, xmm1
+        } else {
+          | pushxmm xmm0
+          | xorpd xmm0, xmm0
+        }
+        | push rax
+        | xor eax, eax
       }
 
-
-      | comisd xmm1, xmm0
+      if( REG == REG_XMM0 ) {
+        | comisd xmm0, xmm1
+      } else {
+        | comisd xmm1, xmm0
+      }
 
       if(op == TK_AND) {
         | je =>tag
@@ -853,7 +957,7 @@ int logic( struct compiler* comp , int REG ) {
         | jne =>tag
       }
 
-      if(comparison(comp,REG_XMM1))
+      if(comparison(comp,REG))
         return -1;
     } while(1);
 
@@ -869,31 +973,19 @@ int logic( struct compiler* comp , int REG ) {
       } else {
         | cvtsi2sd xmm0, eax
       }
-    } else {
-      /* we don't have a actual logic combinator,
-       * so no need to normalize the value */
-      if(REG == REG_XMM0) {
-        | movsd xmm0, xmm1
+      | pop rax
+      if( REG == REG_XMM0 ) {
+        | popxmm xmm1
+      } else {
+        | popxmm xmm0
       }
     }
-    | pop rax
-  }
-  if(REG == REG_XMM0) {
-    | popxmm xmm1
-  } else {
-    | popxmm xmm0
   }
   return 0;
 }
 
 int expr( struct compiler* comp , int REG ) {
-  if( REG == REG_XMM0 ) {
-    | pushxmm xmm1
-  } else {
-    | pushxmm xmm0
-  }
-
-  if(logic(comp,REG_XMM1))
+  if(logic(comp,REG))
     return -1;
 
   if(comp->tk.tk == TK_QUESTION) {
@@ -908,13 +1000,20 @@ int expr( struct compiler* comp , int REG ) {
 
     comp->tag += 2;
 
-    | xorpd xmm0, xmm0
-    | comisd xmm1, xmm0
-    | je => tag
+    if( REG == REG_XMM1 ) {
+      | xorpd xmm0, xmm0
+      | comisd xmm1, xmm0
+      | je => tag
+    } else {
+      | xorpd xmm1, xmm1
+      | comisd xmm0, xmm1
+      | je => tag
+    }
 
     /* first value */
-    if(logic(comp,REG_XMM0))
+    if(logic(comp,REG))
       return -1;
+
     | jne =>exit
 
     if(comp->tk.tk == TK_COLON)
@@ -926,24 +1025,11 @@ int expr( struct compiler* comp , int REG ) {
 
     /* second value */
     |=> tag:
-    if(logic(comp,REG_XMM0))
+    if(logic(comp,REG))
       return -1;
 
     /* exit location for this tenary */
     |=> exit:
-    if( REG == REG_XMM0 ) {
-      | popxmm xmm1
-    } else {
-      | movsd xmm1, xmm0
-      | popxmm xmm0
-    }
-  } else {
-    if( REG == REG_XMM1 ) {
-      | popxmm xmm0
-    } else {
-      | movsd xmm0, xmm1
-      | popxmm xmm1
-    }
   }
 
   return 0;
@@ -1000,9 +1086,13 @@ void* compile( const char* src ) {
   if(tk_init(&(comp.tk),src) <0)
     return NULL;
 
-  /* start parsing */
+  /* generate a stack frame pointer but I don't think it
+   * is useful on X86-64  */
+  | push rbx
+  | mov rbx,rsp
   if(expr(&comp,REG_XMM0))
     return NULL;
+  | pop rbx
   | ret
 
   state = comp.dstate; /* For safety reason, since it is a pointer 2
@@ -1032,6 +1122,21 @@ static double my_div(double a,double b) {
   return a/b;
 }
 
+#ifdef DUMP_ASSEMBLY
+static void dump_assemb( void* ptr ) {
+    ud_t ud;
+    size_t* size = (size_t*)((char*)ptr - sizeof(size_t));
+
+    ud_init(&ud);
+    ud_set_input_buffer(&ud,ptr,*size);
+    ud_set_mode(&ud,64);
+    ud_set_syntax(&ud,UD_SYN_INTEL);
+    while(ud_disassemble(&ud)) {
+        printf("\t%s\n",ud_insn_asm(&ud));
+    }
+}
+#endif /* DUMP_ASSEMBLY */
+
 int main( int argc , char* argv[] ) {
   add_func("abs",my_abs);
   add_func("mul",my_mul);
@@ -1042,6 +1147,9 @@ int main( int argc , char* argv[] ) {
   } else {
     void* c = compile(argv[1]);
     assert(c);
+#ifdef DUMP_ASSEMBLY
+    dump_assemb(c);
+#endif /* DUMP_ASSEMBLY */
     func f = (func)c;
     printf("%f\n",f());
     free_jitcode(c);
