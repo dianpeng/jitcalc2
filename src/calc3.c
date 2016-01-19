@@ -10,53 +10,107 @@
 #include <sys/mman.h>
 #include <inttypes.h>
 
-/* This is a little bit fancier integer calculator it will do the comparison stuff
- * and also unary plus call a C function. But at your own risk , you could screw up
- * since we don't have a full compiler backend to check the prototype is matched or
- * not. */
+
+/* This calculator is more fancy than the one we build in calc2.c. It actually allows
+ * you to handle floating point number calculation. Also we allow user to call a func
+ * that is in a shared object which is much more flexible than before */
+
+/* Before we start doing anything, we need to make sure that we have enough knowledge.
+ *
+ * 1. Number is always represented as a double instead of integer.
+ * The rational behind this is that representing number directly using double precision
+ * will simply makes our life easier. Because passing argument for integer/double-word
+ * is different with passing arguments for floating point. They use different sets of
+ * registers. Which requires type analysing (semantic checking) and it is out of the
+ * scope of this code. For simplicity all the number are only supported through number.
+ *
+ * This also requires the function that you call from the script must have a prototype
+ * for double of each number. Otherwise behavior is undefined, mostly it is a crash.
+ *
+ * 2. The calling convention on X64 AMD is that caller is able to freely use register
+ * from xmm0 - xmm7 which will give us 8 free registers, and also it allows us to pass
+ * up to 8 floating point number through these 8 registers. This increase our callable
+ * argument number from 6 to 8 */
 
 /* Just X64. Only for fun :) */
 |.arch x64
 |.actionlist actions
+/* Setup globals since we will use local label */
+|.globals CALC3
+void* CALC3_GLOBALS[CALC3_MAX];
 
-/* Now things become complicated because we allow user to call functions. For simplicity
- * we *ONLY* allow user to call a function with maximum 6 arguments .Because these 6
- * arguments can be passed into register by default on X64 which is simple for us */
+/* Since we only gonna support floating point value. Therefore we gonna use new push
+ * arg macro.
+ */
 
-|.macro pusharg1, arg1
-  | mov edi, arg1
+|.macro pusharg1, val
+  | movsd xmm0, val
 |.endmacro
 
-|.macro pusharg2, arg2
-  | mov esi, arg2
+|.macro pusharg2, val
+  | movsd xmm1, val
 |.endmacro
 
-|.macro pusharg3, arg3
-  | mov edx, arg3
+|.macro pusharg3, val
+  | movsd xmm2, val
 |.endmacro
 
-|.macro pusharg4, arg4
-  | mov ecx, arg4
+|.macro pusharg4, val
+  | movsd xmm3, val
 |.endmacro
 
-|.macro pusharg5, arg5
-  | mov r8d, arg5
+|.macro pusharg5, val
+  | movsd xmm4, val
 |.endmacro
 
-|.macro pusharg6, arg6
-  | mov r9d,arg6
+|.macro pusharg6, val
+  | movsd xmm5, val
 |.endmacro
 
-/* Fuck linker.
- * We use rbx since it is not that 6 registers that is
- * used to pass parameter and also not use as return value
- * so it is safe to do this before we call into another
- * function */
-|.macro callp, addr
-   | push rbx
-   | mov rbx, (uintptr_t)addr
-   | call rbx
-   | pop rbx
+|.macro pusharg7, val
+  | movsd xmm6, val
+|.endmacro
+
+|.macro pusharg8, val
+  | movsd xmm7, val
+|.endmacro
+
+|.macro debug, tp , val
+  | pushxmm xmm0
+  | pushxmm xmm1
+  | movsd xmm0,val
+  | mov edi, tp
+  | callq &Debug
+  | popxmm xmm1
+  | popxmm xmm0
+|.endmacro
+
+/* Since no instruction support push xmm registers onto stack, we need to roll
+ * our own wheels. It basically just modify the RSP pointer and use move to move
+ * the value directly to it. On thing to note, the stack is growing down, which
+ * means from higher address to lower address. Allocating memory from stack is
+ * really substract the pointer of stack register. Eg:
+ * sub rsp,8 ; this allocates 8 bytes on top of the stack
+ * movsb [rsp] xmm0  ; this move the double precision number from xmm0 register to
+ *                   ; the allocated space. Because the CPU treats memory grows from
+ *                   ; lower to higher so the current RSP is really the base address
+ *                   ; for our temporary spaces
+ */
+|.macro pushxmm, reg
+  | sub rsp, 8
+  | movsd qword [rsp], reg
+|.endmacro
+
+|.macro popxmm, reg
+  | movsd reg, qword [rsp]
+  | add rsp, 8
+|.endmacro
+
+/* since we will not use EAX register anymore, so
+ * we don't need to push it onto the stack here */
+|.macro callq, addr
+  | mov rax, addr
+  | call rax
 |.endmacro
 
 /* Per tutorial , Dst must be pointed to the dasm_State* .
@@ -95,7 +149,7 @@ struct tokenizer {
   int tk;
   int len;
   union {
-    int num;
+    double num;
     char symbol[32];
   } val;
 };
@@ -178,9 +232,9 @@ re_lex:
       { /* parsing the number into val */
         char* end;
         errno = 0;
-        tk->val.num = strtol(tk->src+tk->pos,&end,10);
+        tk->val.num = strtod(tk->src+tk->pos,&end);
         if(errno) {
-          fprintf(stderr,"cannot parse number:%s!",
+          fprintf(stderr,"cannot parse number:%s!\n",
               strerror(errno));
           return -1;
         }
@@ -195,7 +249,7 @@ re_lex:
         for( ; isalnum(tk->src[j]) || tk->src[j] == '_' ; ++j )
           ;
         if( j - tk->pos >= 32 ) {
-          fprintf(stderr,"too long variable name,more than 32!");
+          fprintf(stderr,"too long variable name,more than 32!\n");
           return -1;
         } else {
           memcpy(tk->val.symbol,tk->src+tk->pos,j-tk->pos);
@@ -204,7 +258,7 @@ re_lex:
         tk->len = j - tk->pos;
         return (tk->tk = TK_VARIABLE);
       } else {
-        fprintf(stderr,"unexpected token character:%c",
+        fprintf(stderr,"unexpected token character:%c\n",
             tk->src[tk->pos]);
         return -1;
       }
@@ -222,31 +276,7 @@ void tk_move( struct tokenizer* tk ) {
   tk_next(tk);
 }
 
-/* Now the grammar is little bit complicated than before:
- * We have unary and relational operations. We don't stick
- * the precendence with C since it is too much work. We just
- * make *ALL* relation expression has one lowest precendence.
- *
- * EXPRESSION : RELATION
- *
- * RELATION := TERM
- *   RELATION '>'|'>='|'<'|'<='|'=='|'!=' TERM
- * TERM := FACTOR
- *   TERM '+'|'-' FACTOR
- * FACTOR := UNARY
- *   FACTOR '*'|'/' UNARY
- * UNARY := ATOMIC
- *   ('-'|'!'|'+')* ATOMIC
- * ATMOIC := NUMBER |
- *           VARIABLE |
- *           '(' EXPRESSION ')' |
- *           FUNCTION-CALL
- *
- * FUNCTION-CALL := VARIABLE '(' ARG-LIST ')
- *
- * ARG-LIST := // EMPTY
- *   EXPRESSION (',' EXPRESSION)*
- */
+/* Compiler */
 
 struct compiler {
   struct tokenizer tk;
@@ -266,9 +296,17 @@ void check_compiler_tag( struct compiler* comp ) {
 }
 
 /* Variable lookup */
+static
 const char* STRTABLE[100];
+static
 size_t STRTABLE_POS = 0;
+
 static const char* add_string( const char* name ) {
+  size_t i;
+  for( i = 0 ; i < STRTABLE_POS ; ++i ) {
+    if( strcmp(STRTABLE[i],name) == 0 )
+      return STRTABLE[i];
+  }
   if(STRTABLE_POS==100)
     return NULL;
   else {
@@ -276,7 +314,9 @@ static const char* add_string( const char* name ) {
   }
 }
 
-static int lookup( const char* name ) {
+/* Now our variable lookup will result int double precision number
+ * instead of integer. So we gonna return double precision number */
+static double lookup( const char* name ) {
   if(strcmp(name,"defined_var")==0)
     return 100;
   else
@@ -288,7 +328,9 @@ struct function {
   const char* name;
 };
 
+static
 struct function FUNCTABLE[100];
+static
 size_t FUNCTABLE_POS = 0;
 
 static void* func_lookup( const char* name ) {
@@ -307,9 +349,46 @@ static void add_func( const char* name , void* entry ) {
   ++FUNCTABLE_POS;
 }
 
+static
+double NUMTABLE[100];
+
+static
+size_t NUMTABLE_POS =0;
+
+static const double NZERO = -0.0;
+static const double DTRUE = 1.0;
+static const double DFALSE= 0.0;
+
+static void* add_number( double num ) {
+  size_t i;
+  for( i = 0 ; i < NUMTABLE_POS ; ++i ) {
+    if( num == NUMTABLE[i] )
+      return NUMTABLE + i;
+  }
+  if( NUMTABLE_POS == 100 )
+    return NULL;
+  else {
+    NUMTABLE[NUMTABLE_POS++]=num;
+    return NUMTABLE + NUMTABLE_POS -1;
+  }
+}
+
+static void Debug( int type , double val ) {
+  printf("TYPE:%d,DEBUG:%f\n",type,val);
+}
+
+/* We gonna use XMM0 which is the default return register for
+ * function to return double precision number. Also we gonna
+ * use XMM1 in case we want compile operand. */
+
+/* To clarify the protocol for using register here, any register
+ * indicated by REG for each compilation sub-routine, it is always
+ * free to be used by that routine. No need to maintain the status
+ * of it. But any registeres not mentioned in REG , the compilation
+ * sub-routine _MUST_ maintain its status */
 enum {
-  REG_EAX, /* callee save */
-  REG_EBX  /* callee save */
+  REG_XMM0,
+  REG_XMM1
 };
 
 int expr( struct compiler* comp , int REG );
@@ -324,54 +403,74 @@ int func_call( struct compiler* comp , int REG , const char* fn ) {
   if(!addr) { fprintf(stderr,"no such function:%s!",fn); return -1; }
   tk_move(&(comp->tk));
   while(comp->tk.tk != TK_RPAR) {
-    /* until now we haven't use EAX/RAX */
-    if(expr(comp,REG_EAX))
+    /* Always force the expression generate code in XMM0 registers */
+    if(expr(comp,REG_XMM0))
       return -1;
+
     /* push the value into corresponding register for call */
     switch(cnt) {
       case 0:
-        | pusharg1 eax
+        /* Because we store our temporary valu einto REG_XMM0, we cannot
+         * use this register until we finish every function arguments parsing,
+         * so we push it onto stack */
+        | pushxmm xmm0
         break;
       case 1:
-        | pusharg2 eax
+        | pusharg2 xmm0
         break;
       case 2:
-        | pusharg3 eax
+        | pusharg3 xmm0
         break;
       case 3:
-        | pusharg4 eax
+        | pusharg4 xmm0
         break;
       case 4:
-        | pusharg5 eax
+        | pusharg5 xmm0
         break;
       case 5:
-        | pusharg6 eax
+        | pusharg6 xmm0
+        break;
+        /* We allow up to 8 arguments to be passed */
+      case 6:
+        | pusharg7 xmm0
+        break;
+      case 7:
+        | pusharg8 xmm0
         break;
       default:
         assert(0);
     }
-    ++cnt;
-    if(cnt == 6) {
-      fprintf(stderr,"only 6 arguments is allowed to call a function!");
-      return -1;
-    }
+
     /* check comma or not */
     if(comp->tk.tk != TK_COMMA)
       break;
     else
       tk_move(&(comp->tk));
+
+    ++cnt;
+    if(cnt == 8) {
+      fprintf(stderr,"only 6 arguments is allowed to call a function!");
+      return -1;
+    }
   }
+
+  /* Now we need to patch the first argument since it is in the stack now */
+  if(cnt >= 1) {
+    /* If no argument is passed in, then we do nothing */
+    | popxmm xmm0
+  }
+
   /* Expect a ) */
   if(comp->tk.tk != TK_RPAR) {
     fprintf(stderr,"The function is not properly closed!");
     return -1;
   }
   /* Emit call crap */
-  | callp addr
+  | callq addr
 
   /* Now move result accordingly */
-  if( REG = REG_EBX ) {
-    | mov ebx, eax
+  if( REG == REG_XMM1 ) {
+    | movsd xmm1, xmm0
   }
 
   tk_move(&(comp->tk));
@@ -403,21 +502,42 @@ int atomic( struct compiler* comp , int REG ) {
         /* it is a function call */
         return func_call(comp,REG,var);
       } else {
-        /* generate call stub */
-        | mov rdi, var
-        | callp &lookup
-        if( REG == REG_EBX ) {
-          | mov ebx, eax
+        /* generate call stub. as we say, that if the REG
+         * is not REG_XMM0 we cannot use it safely, so we
+         * need to generate workaround here */
+        if( REG ==  REG_XMM1 ) {
+          | pushxmm xmm0
         }
+
+        | mov rdi, var
+        | callq &lookup
+
+        /* the value returned from the lookup table is
+         * actually in the XMM0 register */
+        if( REG == REG_XMM1 ) {
+          | movsd xmm1, xmm0
+          | popxmm xmm0
+        }
+
       }
       break;
     }
     case TK_NUMBER: {
-      int num = comp->tk.val.num;
-      if( REG == REG_EAX ) {
-        | mov eax, dword num
+      /* Push number literal is a little bit complicated
+       * since machine doesn't support 64 bits immediate
+       * number which forces us to push the value from
+       * memory. A typical compiler will generate the corresponding
+       * 64 bit number in a specific section and load it
+       * with specific memory. We don't do this since we
+       * are on the runtime. We will allocate number table
+       * and find the address and load it. The number table
+       * will not be cleared until we finish our runing */
+      double num = comp->tk.val.num;
+      void* ptr = add_number(num);
+      if( REG == REG_XMM0 ) {
+        | movsd xmm0, qword [ptr]
       } else {
-        | mov ebx, dword num
+        | movsd xmm1, qword [ptr]
       }
       break;
     }
@@ -457,35 +577,66 @@ int unary( struct compiler* comp , int REG ) {
 
   /* now we need to call atomic function */
   /* we don't need to save rax because until now we haven't used it */
-  if(atomic(comp,REG_EAX)) {
+  if(REG != REG_XMM0) {
+    | pushxmm xmm0
+  } else {
+    | pushxmm xmm1
+  }
+
+  if(atomic(comp,REG_XMM0)) {
     return -1;
   }
+
   /* now we know EAX must contain our baby */
   for( i = 0 ; i < sz ; ++i ) {
     switch(op[i]) {
       case TK_SUB:
-        | neg eax
+        /* Negate a signed double precision number is not very easy. We don't
+         * have a instruction doing this sort of things. The actual thing that
+         * I want to do is just fliping the MSB of this 64 bits value. To do
+         * this we load a negative zero which has MSB set to 1, rest to be zero.
+         * And XOR it with the value we want to negate */
+        | movsd xmm1, qword [&NZERO]
+        | xorpd xmm0, xmm1
       case TK_ADD:
         /* positive sign is crap */
         break;
       case TK_NOT:
-        | cmp eax, 0
-        | sete al
-        | movsx eax,al
+        /* This one is kind of direct. Just compare our value with zero , however
+         * this is will ignore the negative zero. Anyway, we don't care right now.
+         * If it is zero, just load true to xmm0 , otherwise false to xmm0. I don't
+         * quit understand how GCC generate code for this thing, actually. But this
+         * one is good for illustration here */
+        | xorpd xmm1,xmm1
+        | comisd xmm0,xmm1
+        | jne >1
+        | movsd xmm0,qword [&DTRUE]
+        |1:
+        | movsd xmm0,qword [&DFALSE]
         break;
       default:
         assert(0);
     }
   }
-  if( REG == REG_EBX ) {
-    | mov ebx, eax
+
+  if( REG == REG_XMM1 ) {
+    | movsd xmm1,xmm0
+    | popxmm xmm0
+  } else {
+    | popxmm xmm1
   }
   return 0;
 }
 
 /* factor */
 int factor( struct compiler* comp , int REG ) {
-  if(unary(comp,REG_EAX)) {
+  if( REG != REG_XMM0 ) {
+    | pushxmm xmm0
+  } else {
+    | pushxmm xmm1
+  }
+
+  if(unary(comp,REG_XMM0)) {
     return -1;
   }
   else {
@@ -494,59 +645,67 @@ int factor( struct compiler* comp , int REG ) {
       int op;
       if(comp->tk.tk != TK_MUL &&
          comp->tk.tk != TK_DIV ) {
-        if( REG == REG_EBX ) {
-          | mov ebx, eax
-        }
         break;
       }
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      | push rax
-      if(unary(comp,REG_EBX))
+      if(unary(comp,REG_XMM1))
         return -1;
-      | pop rax
 
       if(op == TK_MUL) {
-        | imul eax, ebx
+        | mulsd xmm0, xmm1
       } else {
-        | cdq
-        | idiv ebx
+        | divsd xmm0, xmm1
       }
 
     } while(1);
+  }
+
+
+  if( REG == REG_XMM1 ) {
+    | movsd xmm1,xmm0
+    | popxmm xmm0
+  } else {
+    | popxmm xmm1
   }
   return 0;
 }
 
 /* term */
 int term( struct compiler* comp , int REG ) {
-  if(factor(comp,REG_EAX))
+  if( REG != REG_XMM0 ) {
+    | pushxmm xmm0
+  } else {
+    | pushxmm xmm1
+  }
+  if(factor(comp,REG_XMM0))
     return -1;
   else {
     do {
       int op;
       if(comp->tk.tk != TK_ADD &&
          comp->tk.tk != TK_SUB ) {
-        if( REG == REG_EBX ) {
-          | mov ebx , eax
-        }
         break;
       }
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      | push rax
-      if(factor(comp,REG_EBX))
+      if(factor(comp,REG_XMM1))
         return -1;
-      | pop rax
 
       if(op == TK_ADD) {
-        | add eax, ebx
+        | addsd xmm0, xmm1
       } else {
-        | sub eax, ebx
+        | subsd xmm0, xmm1
       }
     } while(1);
+  }
+  if( REG == REG_XMM1 ) {
+    | movsd xmm1, xmm0
+    | popxmm xmm0
+  } else {
+    | popxmm xmm1
   }
   return 0;
 }
@@ -556,7 +715,14 @@ int comparison( struct compiler* comp , int REG ) {
   /* generate comparison is simple just need to use
    * CMP/TEST instructions. Since we don't bother for
    * having optimization, mostly we just use CMP */
-  if(term(comp,REG_EAX))
+
+  if( REG == REG_XMM0 ) {
+    | pushxmm xmm1
+  } else {
+    | pushxmm xmm0
+  }
+
+  if(term(comp,REG_XMM0))
     return -1;
   else {
     int op;
@@ -567,80 +733,118 @@ int comparison( struct compiler* comp , int REG ) {
           comp->tk.tk != TK_GE &&
           comp->tk.tk != TK_NE &&
           comp->tk.tk != TK_EQ ) {
-        if( REG == REG_EBX ) {
-          | mov ebx, eax
-        }
         break;
       }
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      | push rax
-      if(term(comp,REG_EBX))
+      if(term(comp,REG_XMM1))
         return -1;
-      | pop rax
 
       switch(op) {
         case TK_LT:
-          | cmp eax, ebx
-          | setl al
-          | movsx eax,al
+          | push rcx
+          | comisd xmm0, xmm1
+          | setb cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         case TK_LE:
-          | cmp eax, ebx
-          | setle al
-          | movsx eax,al
+          | push rcx
+          | comisd xmm0, xmm1
+          | setbe cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         case TK_GT:
-          | cmp eax, ebx
-          | setg al
-          | movsx eax, al
+          | push rcx
+          | comisd xmm0, xmm1
+          | seta cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         case TK_GE:
-          | cmp eax, ebx
-          | setge al
-          | movsx eax,al
+          | push rcx
+          | comisd xmm0, xmm1
+          | setae cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         case TK_EQ:
-          | cmp eax, ebx
-          | sete al
-          | movsx eax,al
+          | push rcx
+          | comisd xmm0, xmm1
+          | sete cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         case TK_NE:
-          | cmp eax, ebx
-          | setne al
-          | movsx eax,al
+          | push rcx
+          | comisd xmm0, xmm1
+          | setne cl
+          | movzx ecx, cl
+          | cvtsi2sd xmm0, ecx
+          | pop rcx
           break;
         default:
           assert(0);
       }
     } while(1);
   }
+  if( REG == REG_XMM0 ) {
+    | popxmm xmm1
+  } else {
+    | movsd xmm1, xmm0
+    | popxmm xmm0
+  }
   return 0;
 }
 
 int logic( struct compiler* comp , int REG ) {
-  if(comparison(comp,REG_EBX))
+  if( REG == REG_XMM0 ) {
+    | pushxmm xmm1
+  } else {
+    | pushxmm xmm0
+  }
+
+  if(comparison(comp,REG_XMM1))
     return -1;
   else {
     int op;
     int tag = -1;
 
+    | xorpd xmm0, xmm0
+    | push rax
+    | xor eax, eax
+
     do {
       if(comp->tk.tk != TK_AND &&
          comp->tk.tk != TK_OR ) {
+        if(tag >= 0) {
+          /* Right now, the last value of check_compiler_tag
+           * is not in the eax but in xmm1/xmm0. We need to
+           * do the comparison and set the eax accordingly */
+          | comisd xmm1, xmm0
+          | setne al
+          | movzx eax, al
+        }
         break;
       }
       op = comp->tk.tk;
       tk_move(&(comp->tk));
-      if( tag< 0 ) {
+
+      if(tag<0) {
         check_compiler_tag(comp);
-        tag = comp->tag; /* get the tag for current jump position */
+        tag = comp->tag;
         ++comp->tag;
       }
 
-      | xor eax, eax
-      | cmp ebx, 0
+
+      | comisd xmm1, xmm0
 
       if(op == TK_AND) {
         | je =>tag
@@ -649,7 +853,7 @@ int logic( struct compiler* comp , int REG ) {
         | jne =>tag
       }
 
-      if(comparison(comp,REG_EBX))
+      if(comparison(comp,REG_XMM1))
         return -1;
     } while(1);
 
@@ -658,26 +862,38 @@ int logic( struct compiler* comp , int REG ) {
       |=>tag:
       | cmp eax, 0
       | setne al
+      | movzx eax, al
 
-      if(REG == REG_EBX) {
-        | movzx ebx, al
+      if(REG == REG_XMM1) {
+        | cvtsi2sd xmm1, eax
       } else {
-        | movzx eax, al
+        | cvtsi2sd xmm0, eax
       }
-
     } else {
       /* we don't have a actual logic combinator,
        * so no need to normalize the value */
-      if(REG == REG_EAX) {
-        | mov eax, ebx
+      if(REG == REG_XMM0) {
+        | movsd xmm0, xmm1
       }
     }
+    | pop rax
+  }
+  if(REG == REG_XMM0) {
+    | popxmm xmm1
+  } else {
+    | popxmm xmm0
   }
   return 0;
 }
 
 int expr( struct compiler* comp , int REG ) {
-  if(logic(comp,REG_EAX))
+  if( REG == REG_XMM0 ) {
+    | pushxmm xmm1
+  } else {
+    | pushxmm xmm0
+  }
+
+  if(logic(comp,REG_XMM1))
     return -1;
 
   if(comp->tk.tk == TK_QUESTION) {
@@ -689,13 +905,15 @@ int expr( struct compiler* comp , int REG ) {
     tag = comp->tag;
     check_compiler_tag(comp);
     exit = comp->tag+1;
+
     comp->tag += 2;
 
-    | cmp eax, 0
+    | xorpd xmm0, xmm0
+    | comisd xmm1, xmm0
     | je => tag
 
     /* first value */
-    if(logic(comp,REG_EAX))
+    if(logic(comp,REG_XMM0))
       return -1;
     | jne =>exit
 
@@ -708,16 +926,26 @@ int expr( struct compiler* comp , int REG ) {
 
     /* second value */
     |=> tag:
-    if(logic(comp,REG_EAX))
+    if(logic(comp,REG_XMM0))
       return -1;
 
     /* exit location for this tenary */
     |=> exit:
+    if( REG == REG_XMM0 ) {
+      | popxmm xmm1
+    } else {
+      | movsd xmm1, xmm0
+      | popxmm xmm0
+    }
+  } else {
+    if( REG == REG_XMM1 ) {
+      | popxmm xmm0
+    } else {
+      | movsd xmm0, xmm1
+      | popxmm xmm1
+    }
   }
 
-  if( REG == REG_EBX ) {
-    | mov ebx, eax
-  }
   return 0;
 }
 
@@ -759,6 +987,7 @@ void* compile( const char* src ) {
   /* initialize dynasm dstate */
   dasm_init(&state,1);
   dasm_setup(&state,actions);
+  dasm_setupglobal(&state,CALC3_GLOBALS,CALC3_MAX);
 
   comp.dstate = state;
 
@@ -771,11 +1000,9 @@ void* compile( const char* src ) {
   if(tk_init(&(comp.tk),src) <0)
     return NULL;
 
-  | push rbx
   /* start parsing */
-  if(expr(&comp,REG_EAX))
+  if(expr(&comp,REG_XMM0))
     return NULL;
-  | pop rbx
   | ret
 
   state = comp.dstate; /* For safety reason, since it is a pointer 2
@@ -790,35 +1017,25 @@ void free_jitcode(void *code) {
   assert(status == 0);
 }
 
-typedef int (*func)();
+typedef double (*func)();
 
 /* Add a simple function and make our code fancier */
-static int my_abs( int val ) {
+static double my_abs( double val ) {
   return val > 0 ? val : -val;
 }
 
-static int my_mul(int a, int b) {
+static double my_mul(double a, double b) {
   return a*b;
 }
 
-static int my_div(int a,int b) {
+static double my_div(double a,double b) {
   return a/b;
-}
-
-static int my_min(int a,int b) {
-  return a > b ? b : a;
-}
-
-static int my_max(int a,int b) {
-  return a > b ? a : b;
 }
 
 int main( int argc , char* argv[] ) {
   add_func("abs",my_abs);
   add_func("mul",my_mul);
   add_func("div",my_div);
-  add_func("min",my_min);
-  add_func("max",my_max);
   if( argc != 2 ) {
     fprintf(stderr,"usage: calc 1+2+3*var\n");
     return -1;
@@ -826,8 +1043,9 @@ int main( int argc , char* argv[] ) {
     void* c = compile(argv[1]);
     assert(c);
     func f = (func)c;
-    printf("%d\n",f());
+    printf("%f\n",f());
     free_jitcode(c);
     return 0;
   }
 }
+

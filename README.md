@@ -12,9 +12,12 @@ lookup.( I forget to implement the unary operation , so actually it still uses s
 This calculator is a little fancier. It allows you to do logic, comparison , arithmatic , variable look up
 and function call. Additionally it supports tenary operation as well.
 
+## calc3.c
+This calculator has same ability with calc2 but it operates on top of double precision number. Sort of
+complicated than calc2.c
+
 #BUILD:
 1. You need luajit or lua with bit operation and MUST BE on 64 bit Linux box
 2. Make
-
 
 # Have fun :)
