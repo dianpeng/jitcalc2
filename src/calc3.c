@@ -754,7 +754,7 @@ int term( struct compiler* comp , int REG ) {
       op = comp->tk.tk;
       tk_move(&(comp->tk));
 
-      if( mreg< 0 ) {
+      if(!mreg) {
         mreg = 1;
         if( REG == REG_XMM0 ) {
           | pushxmm xmm1
