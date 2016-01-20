@@ -44,10 +44,6 @@
 |.globals CALC3
 void* CALC3_GLOBALS[CALC3_MAX];
 
-/* Since we only gonna support floating point value. Therefore we gonna use new push
- * arg macro.
- */
-
 |.macro pusharg1, val
   | movsd xmm0, val
 |.endmacro
@@ -726,9 +722,9 @@ int factor( struct compiler* comp , int REG ) {
         }
       } else {
         if( REG == REG_XMM1 ) {
-          | divsd xmm0, xmm1
-        } else {
           | divsd xmm1, xmm0
+        } else {
+          | divsd xmm0, xmm1
         }
       }
     } while(1);
