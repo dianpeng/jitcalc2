@@ -12,7 +12,7 @@ calc2: src/calc2.c
 
 calc3: src/calc3.c
 	$(LUA) dynasm/dynasm.lua -o src/calc3.pp.c src/calc3.c
-	gcc -DDUMP_ASSEMBLY -O3 -g src/calc3.pp.c $(UDIS) -o calc3
+	gcc -O3 -g src/calc3.pp.c $(UDIS) -o calc3
 
 .PHONY:clean
 clean:

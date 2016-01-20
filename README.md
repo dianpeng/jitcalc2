@@ -16,6 +16,9 @@ and function call. Additionally it supports tenary operation as well.
 This calculator has same ability with calc2 but it operates on top of double precision number. Sort of
 complicated than calc2.c
 
+You could install https://github.com/vmt/udis86 library and add -DDUMP_ASSEMBLY to Makefile for cacl3.c.
+This will enable dumping of generated assembly code.
+
 #BUILD:
 1. You need luajit or lua with bit operation and MUST BE on 64 bit Linux box
 2. Make
