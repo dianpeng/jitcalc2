@@ -419,12 +419,12 @@ int atomic( struct compiler* comp , int REG ) {
       } else {
         | mov ebx, dword num
       }
+      tk_move(&(comp->tk));
       break;
     }
     default:
       return -1;
   }
-  tk_move(&(comp->tk));
   return 0;
 }
 

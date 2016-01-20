@@ -110,8 +110,8 @@ void* CALC3_GLOBALS[CALC3_MAX];
 /* since we will not use EAX register anymore, so
  * we don't need to push it onto the stack here */
 |.macro callq, addr
-  | mov rax, addr
-  | call rax
+  | mov r8, addr
+  | call r8
 |.endmacro
 
 /* Per tutorial , Dst must be pointed to the dasm_State* .
@@ -540,12 +540,12 @@ int atomic( struct compiler* comp , int REG ) {
       } else {
         | movsd xmm1, qword [ptr]
       }
+      tk_move(&(comp->tk));
       break;
     }
     default:
       return -1;
   }
-  tk_move(&(comp->tk));
   return 0;
 }
 
