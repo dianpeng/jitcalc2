@@ -19,6 +19,10 @@ complicated than calc2.c
 You could install https://github.com/vmt/udis86 library and add -DDUMP_ASSEMBLY to Makefile for cacl3.c.
 This will enable dumping of generated assembly code.
 
+##NOTES:
+Right now, calling functions have bug in calc3 and cacl2. I will fix it sometimes later :) Basically
+the registers will be messed up since I forget to save them while I calling another functions :(
+
 #BUILD:
 1. You need luajit or lua with bit operation and MUST BE on 64 bit Linux box
 2. Make

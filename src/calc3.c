@@ -100,11 +100,13 @@ void* CALC3_GLOBALS[CALC3_MAX];
 |.macro pushxmm, reg
   | sub rsp, 8
   | movsd qword [rsp], reg
+  | nop
 |.endmacro
 
 |.macro popxmm, reg
   | movsd reg, qword [rsp]
   | add rsp, 8
+  | nop
 |.endmacro
 
 /* since we will not use EAX register anymore, so
@@ -155,6 +157,7 @@ struct tokenizer {
   } val;
 };
 
+static
 int tk_next( struct tokenizer* tk ) {
 re_lex:
   switch(tk->src[tk->pos]) {
@@ -266,12 +269,14 @@ re_lex:
   }
 }
 
+static
 int tk_init( struct tokenizer* tk , const char* src ) {
   tk->src = src;
   tk->pos = 0;
   return tk_next(tk);
 }
 
+static
 void tk_move( struct tokenizer* tk ) {
   tk->pos += tk->len;
   tk_next(tk);
@@ -286,6 +291,7 @@ struct compiler {
   int tag_cap;
 };
 
+static
 void check_compiler_tag( struct compiler* comp ) {
   if(comp->tag == comp->tag_cap) {
     if(comp->tag_cap == 0)
@@ -392,9 +398,9 @@ enum {
   REG_XMM1
 };
 
-int expr( struct compiler* comp , int REG );
+static int expr( struct compiler* comp , int REG );
 
-/* function call */
+static
 int func_call( struct compiler* comp , int REG , const char* fn ) {
   void* addr; /* function address */
   int cnt = 0; /* function argument count */
@@ -403,6 +409,11 @@ int func_call( struct compiler* comp , int REG , const char* fn ) {
   addr = func_lookup(fn);
   if(!addr) { fprintf(stderr,"no such function:%s!",fn); return -1; }
   tk_move(&(comp->tk));
+
+  if( REG != REG_XMM0 ) {
+    | pushxmm xmm0
+  }
+
   while(comp->tk.tk != TK_RPAR) {
     /* Always force the expression generate code in XMM0 registers */
     if(expr(comp,REG_XMM0))
@@ -442,13 +453,14 @@ int func_call( struct compiler* comp , int REG , const char* fn ) {
         assert(0);
     }
 
+    ++cnt;
+
     /* check comma or not */
     if(comp->tk.tk != TK_COMMA)
       break;
     else
       tk_move(&(comp->tk));
 
-    ++cnt;
     if(cnt == 8) {
       fprintf(stderr,"only 6 arguments is allowed to call a function!");
       return -1;
@@ -472,6 +484,7 @@ int func_call( struct compiler* comp , int REG , const char* fn ) {
   /* Now move result accordingly */
   if( REG == REG_XMM1 ) {
     | movsd xmm1, xmm0
+    | popxmm xmm0
   }
 
   tk_move(&(comp->tk));
@@ -479,6 +492,7 @@ int func_call( struct compiler* comp , int REG , const char* fn ) {
 }
 
 /* number value is always returned in EAX register */
+static
 int atomic( struct compiler* comp , int REG ) {
   /* lex next token from the input */
   switch(comp->tk.tk) {
@@ -556,6 +570,7 @@ struct reg {
 };
 
 /* unary */
+static
 int unary( struct compiler* comp , int REG ) {
   /* generate code for unary is kind of tricky,
    * since the generation order is not the order
@@ -688,6 +703,7 @@ int unary( struct compiler* comp , int REG ) {
 }
 
 /* factor */
+static
 int factor( struct compiler* comp , int REG ) {
   if(unary(comp,REG)) {
     return -1;
@@ -740,6 +756,7 @@ int factor( struct compiler* comp , int REG ) {
 }
 
 /* term */
+static
 int term( struct compiler* comp , int REG ) {
   if(factor(comp,REG))
     return -1;
@@ -791,6 +808,7 @@ int term( struct compiler* comp , int REG ) {
 }
 
 /* Comparison */
+static
 int comparison( struct compiler* comp , int REG ) {
   /* generate comparison is simple just need to use
    * CMP/TEST instructions. Since we don't bother for
@@ -898,6 +916,7 @@ int comparison( struct compiler* comp , int REG ) {
   return 0;
 }
 
+static
 int logic( struct compiler* comp , int REG ) {
   if(comparison(comp,REG))
     return -1;
@@ -980,6 +999,7 @@ int logic( struct compiler* comp , int REG ) {
   return 0;
 }
 
+static
 int expr( struct compiler* comp , int REG ) {
   if(logic(comp,REG))
     return -1;
@@ -1033,7 +1053,7 @@ int expr( struct compiler* comp , int REG ) {
 
 /* COPYWRITE for haberman.
  * github.com/haberman/jitdemo/dynasm-driver.c */
-void *jitcode(dasm_State **state) {
+static void *jitcode(dasm_State **state) {
   size_t size;
   int dasm_status = dasm_link(state, &size);
   assert(dasm_status == DASM_S_OK);
@@ -1061,7 +1081,7 @@ void *jitcode(dasm_State **state) {
   return ret;
 }
 
-void* compile( const char* src ) {
+static void* compile( const char* src ) {
   struct compiler comp;
   dasm_State* state = comp.dstate;
   comp.tag = comp.tag_cap = 0;
@@ -1088,6 +1108,7 @@ void* compile( const char* src ) {
   | mov rbx,rsp
   if(expr(&comp,REG_XMM0))
     return NULL;
+  | mov rsp, rbx
   | pop rbx
   | ret
 
@@ -1097,7 +1118,7 @@ void* compile( const char* src ) {
   return jitcode(&state);
 }
 
-void free_jitcode(void *code) {
+static void free_jitcode(void *code) {
   void *mem = (char*)code - sizeof(size_t);
   int status = munmap(mem, *(size_t*)mem);
   assert(status == 0);
@@ -1120,16 +1141,16 @@ static double my_div(double a,double b) {
 
 #ifdef DUMP_ASSEMBLY
 static void dump_assemb( void* ptr ) {
-    ud_t ud;
-    size_t* size = (size_t*)((char*)ptr - sizeof(size_t));
+  ud_t ud;
+  size_t* size = (size_t*)((char*)ptr - sizeof(size_t));
 
-    ud_init(&ud);
-    ud_set_input_buffer(&ud,ptr,*size);
-    ud_set_mode(&ud,64);
-    ud_set_syntax(&ud,UD_SYN_INTEL);
-    while(ud_disassemble(&ud)) {
-        printf("\t%s\n",ud_insn_asm(&ud));
-    }
+  ud_init(&ud);
+  ud_set_input_buffer(&ud,ptr,*size);
+  ud_set_mode(&ud,64);
+  ud_set_syntax(&ud,UD_SYN_INTEL);
+  while(ud_disassemble(&ud)) {
+    printf("\t%s\n",ud_insn_asm(&ud));
+  }
 }
 #endif /* DUMP_ASSEMBLY */
 
@@ -1152,4 +1173,3 @@ int main( int argc , char* argv[] ) {
     return 0;
   }
 }
-
